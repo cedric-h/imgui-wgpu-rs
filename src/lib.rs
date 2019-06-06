@@ -111,6 +111,7 @@ pub struct Renderer {
     textures: Textures<Texture>,
     atlas: ImTexture,
     clear_color: Option<wgpu::Color>,
+    texture_layout: wgpu::BindGroupLayout,
 }
 
 impl Renderer {
@@ -306,7 +307,12 @@ impl Renderer {
             textures,
             atlas,
             clear_color,
+            texture_layout,
         })
+    }
+
+    pub fn texture_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.texture_layout
     }
 
     pub fn textures(&mut self) -> &mut Textures<Texture> {
