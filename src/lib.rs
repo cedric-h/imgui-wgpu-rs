@@ -391,10 +391,9 @@ impl Renderer {
         device: &mut wgpu::Device,
         rpass: &mut wgpu::RenderPass<'render>,
         draw_list: &DrawList<'data>,
-        _fb_size: (f32, f32),
+        fb_size: (f32, f32),
     ) -> RendererResult<()> {
-        //only used for scissor?
-        //let (fb_width, fb_height) = fb_size;
+        let (fb_width, fb_height) = fb_size;
 
         let base_vertex = self.vertex_count;
         let mut start = self.index_count as u32;
@@ -415,20 +414,18 @@ impl Renderer {
             rpass.set_bind_group(1, tex.bind_group(), &[]);
 
             let end = start + cmd.elem_count;
-            /*
-            let scissor = (
-              cmd.clip_rect.x.max(0.0).min(fb_width).round() as u16,
-              cmd.clip_rect.y.max(0.0).min(fb_height).round() as u16,
+            rpass.set_scissor_rect(
+              cmd.clip_rect.x.max(0.0).min(fb_width).round() as u32,
+              cmd.clip_rect.y.max(0.0).min(fb_height).round() as u32,
               (cmd.clip_rect.z - cmd.clip_rect.x)
                 .abs()
                 .min(fb_width)
-                .round() as u16,
+                .round() as u32,
               (cmd.clip_rect.w - cmd.clip_rect.y)
                 .abs()
                 .min(fb_height)
-                .round() as u16,
-            );*/
-
+                .round() as u32,
+            );
             rpass.draw_indexed(start..end, base_vertex as i32, 0..1);
 
             start = end;
