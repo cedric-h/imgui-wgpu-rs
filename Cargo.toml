@@ -18,8 +18,8 @@ env_logger = "0.5"
 glsl-to-spirv = "0.1"
 log = "0.4"
 num-traits = "0.2.6"
-imgui = "0.0.23"
-imgui-winit-support = "0.0.23"
+imgui = { git = "https://github.com/Gekkio/imgui-rs.git" }
+imgui-winit-support = { git = "https://github.com/Gekkio/imgui-rs.git" }
 
 [dev-dependencies]
 # winit = "*"
