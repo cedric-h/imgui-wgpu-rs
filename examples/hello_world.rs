@@ -1,6 +1,6 @@
 use imgui::*;
 use imgui_wgpu::Renderer;
-use imgui_winit_support;
+use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use std::time::Instant;
 use wgpu::winit::{
     dpi::LogicalSize, ElementState, Event, EventsLoop, KeyboardInput, VirtualKeyCode,
@@ -51,6 +51,7 @@ fn main() {
         format: wgpu::TextureFormat::Bgra8Unorm,
         width: size.width as u32,
         height: size.height as u32,
+        present_mode: wgpu::PresentMode::Vsync,
     };
 
     let mut swap_chain = device.create_swap_chain(&surface, &sc_desc);
@@ -58,20 +59,24 @@ fn main() {
     //
     // Set up dear imgui
     //
-    let mut imgui = ImGui::init();
+    let mut imgui = Context::create();
     imgui.set_ini_filename(None);
 
+    let mut platform = WinitPlatform::init(&mut imgui);
+
     let font_size = (13.0 * dpi_factor) as f32;
-    imgui.set_font_global_scale((1.0 / dpi_factor) as f32);
+    imgui.io_mut().font_global_scale = (1.0 / dpi_factor) as f32;
 
-    imgui.fonts().add_default_font_with_config(
-        ImFontConfig::new()
-            .oversample_h(1)
-            .pixel_snap_h(true)
-            .size_pixels(font_size),
-    );
+    imgui.fonts().add_font(&[
+        FontSource::DefaultFontData {
+            config: Some(FontConfig {
+                size_pixels: font_size,
+                ..FontConfig::default()
+            }),
+        },
+    ]);
 
-    imgui_winit_support::configure_keys(&mut imgui);
+    platform.attach_window(imgui.io_mut(), &window, HiDpiMode::Rounded);
 
     //
     // Set up dear imgui wgpu renderer
@@ -108,6 +113,7 @@ fn main() {
                         format: wgpu::TextureFormat::Bgra8Unorm,
                         width: size.width as u32,
                         height: size.height as u32,
+                        present_mode: wgpu::PresentMode::Vsync,
                     };
 
                     swap_chain = device.create_swap_chain(&surface, &sc_desc);
@@ -135,39 +141,35 @@ fn main() {
                 _ => (),
             }
 
-            imgui_winit_support::handle_event(&mut imgui, &event, dpi_factor, dpi_factor);
+            platform.handle_event(imgui.io_mut(), &window, &event);
         });
 
-        let now = Instant::now();
-        let delta = now - last_frame;
-        let delta_s = delta.as_secs() as f32 + delta.subsec_nanos() as f32 / 1_000_000_000.0;
-        last_frame = now;
-
-        imgui_winit_support::update_mouse_cursor(&imgui, &window);
+        let io = imgui.io_mut();
+        platform.prepare_frame(io, &window).expect("Failed to start frame");
+        last_frame = io.update_delta_time(last_frame);
 
         let frame = swap_chain.get_next_texture();
-        let frame_size = imgui_winit_support::get_frame_size(&window, dpi_factor).unwrap();
-        let ui = imgui.frame(frame_size, delta_s);
+        let mut ui = imgui.frame();
 
         {
-            ui.window(im_str!("Hello world"))
-                .size((300.0, 100.0), ImGuiCond::FirstUseEver)
-                .build(|| {
+            Window::new(im_str!("Hello world"))
+                .size([300.0, 100.0], Condition::FirstUseEver)
+                .build(&ui, || {
                     ui.text(im_str!("Hello world!"));
                     ui.text(im_str!("This...is...imgui-rs on WGPU!"));
                     ui.separator();
-                    let mouse_pos = ui.imgui().mouse_pos();
+                    let mouse_pos = ui.io().mouse_pos;
                     ui.text(im_str!(
                         "Mouse Position: ({:.1},{:.1})",
-                        mouse_pos.0,
-                        mouse_pos.1
+                        mouse_pos[0],
+                        mouse_pos[1]
                     ));
                 });
 
-            ui.window(im_str!("Hello too"))
-                .position((300.0, 300.0), ImGuiCond::FirstUseEver)
-                .size((400.0, 200.0), ImGuiCond::FirstUseEver)
-                .build(|| {
+            Window::new(im_str!("Hello too"))
+                .position([300.0, 300.0], Condition::FirstUseEver)
+                .size([400.0, 200.0], Condition::FirstUseEver)
+                .build(&ui, || {
                     ui.text(im_str!("Hello world!"));
                 });
 
@@ -177,8 +179,9 @@ fn main() {
         let mut encoder: wgpu::CommandEncoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
 
+        let draw_data = ui.render();
         renderer
-            .render(ui, &mut device, &mut encoder, &frame.view)
+            .render(draw_data, &mut device, &mut encoder, &frame.view)
             .expect("Rendering failed");
 
         device.get_queue().submit(&[encoder.finish()]);

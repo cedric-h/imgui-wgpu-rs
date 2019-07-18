@@ -110,7 +110,7 @@ pub struct Renderer {
     index_count: u64,
     index_max: u64,
     textures: Textures<WgpuTexture>,
-    font_texture: WgpuTexture,
+    font_texture_id: TextureId,
     clear_color: Option<wgpu::Color>,
     texture_layout: wgpu::BindGroupLayout,
 }
@@ -250,11 +250,11 @@ impl Renderer {
             usage: wgpu::BufferUsage::INDEX | wgpu::BufferUsage::TRANSFER_DST,
         });
 
-        // Create font texture
-        let font_texture = upload_font_texture(context.fonts(), &texture_layout, device);
-
         // Create textures storage
-        let textures = Textures::new();
+        let mut textures = Textures::new();
+
+        // Create font texture
+        let font_texture_id = upload_font_texture(context.fonts(), &texture_layout, &mut textures, device);
 
         // Set the renderer name
         context.set_renderer_name(Some(ImString::from(format!(
@@ -273,7 +273,7 @@ impl Renderer {
             index_count: 0,
             index_max,
             textures,
-            font_texture,
+            font_texture_id,
             clear_color,
             texture_layout,
         })
@@ -284,7 +284,8 @@ impl Renderer {
         context: &mut imgui::Context,
         device: &mut wgpu::Device,
     ) {
-        self.font_texture = upload_font_texture(context.fonts(), &self.texture_layout, device);
+        self.textures.remove(self.font_texture_id);
+        self.font_texture_id = upload_font_texture(context.fonts(), &self.texture_layout, &mut self.textures, device);
     }
 
     pub fn texture_layout(&self) -> &wgpu::BindGroupLayout {
@@ -596,8 +597,9 @@ fn upload_immediate(
 fn upload_font_texture(
     mut fonts: imgui::FontAtlasRefMut,
     texture_layout: &wgpu::BindGroupLayout,
+    textures: &mut Textures<WgpuTexture>,
     device: &mut wgpu::Device
-) -> WgpuTexture {
+) -> TextureId {
     let texture_data = fonts.build_rgba32_texture();
     let texture = create_texture(
         texture_data.width,
@@ -606,8 +608,6 @@ fn upload_font_texture(
         wgpu::TextureFormat::Rgba8Unorm,
         device,
     );
-    fonts.tex_id = TextureId::from(std::usize::MAX);
-
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -621,5 +621,7 @@ fn upload_font_texture(
         //max_anisotropy: 0,
         //border_color: wgpu::BorderColor::TransparentBlack,
     });
-    WgpuTexture::new(texture, sampler, &texture_layout, device)
+    let result = textures.insert(WgpuTexture::new(texture, sampler, &texture_layout, device));
+    fonts.tex_id = result;
+    result
 }
