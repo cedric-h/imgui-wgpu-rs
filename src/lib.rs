@@ -315,14 +315,9 @@ impl Renderer {
         let bottom = draw_data.display_pos[1] + draw_data.display_size[1];
         let matrix = [
             [(2.0 / (right - left)), 0.0, 0.0, 0.0],
-            [0.0, (2.0 / (top - bottom)), 0.0, 0.0],
+            [0.0, (2.0 / (bottom - top)), 0.0, 0.0],
             [0.0, 0.0, -1.0, 0.0],
-            [
-                (right + left) / (left - right),
-                (top + bottom) / (bottom - top),
-                0.0,
-                1.0,
-            ],
+            [-1.0, -1.0, 0.0, 1.0],
         ];
         let clip_off = draw_data.display_pos;
         let clip_scale = draw_data.framebuffer_scale;
