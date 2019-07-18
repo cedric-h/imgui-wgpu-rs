@@ -1,4 +1,5 @@
-use imgui::{DrawList, DrawData, DrawIdx, DrawVert, Context, TextureId, Textures, Ui, ImString};
+use imgui::{DrawCmd, DrawCmdParams, DrawList, DrawData, DrawIdx, DrawVert, Context, TextureId, Textures, Ui, ImString};
+use imgui::internal::RawWrapper;
 use std::mem::size_of;
 use std::slice::from_raw_parts;
 use std::str::from_utf8;
@@ -300,26 +301,30 @@ impl Renderer {
         device: &mut wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-    ) -> RendererResult<()> {
-        let FrameSize {
-            logical_size: (width, height),
-            hidpi_factor,
-        } = ui.frame_size();
-
-        if !(width > 0.0 && height > 0.0) {
+    ) -> RendererResult<()> {  
+        let fb_width = draw_data.display_size[0] * draw_data.framebuffer_scale[0];
+        let fb_height = draw_data.display_size[1] * draw_data.framebuffer_scale[1];
+        let fb_size = (fb_width, fb_height);
+        if !(fb_width > 0.0 && fb_height > 0.0) {
             return Ok(());
         }
-        let fb_size = (
-            (width * hidpi_factor) as f32,
-            (height * hidpi_factor) as f32,
-        );
-
+        let left = draw_data.display_pos[0];
+        let right = draw_data.display_pos[0] + draw_data.display_size[0];
+        let top = draw_data.display_pos[1];
+        let bottom = draw_data.display_pos[1] + draw_data.display_size[1];
         let matrix = [
-            [(2.0 / width) as f32, 0.0, 0.0, 0.0],
-            [0.0, (2.0 / height) as f32, 0.0, 0.0],
+            [(2.0 / (right - left)), 0.0, 0.0, 0.0],
+            [0.0, (2.0 / (top - bottom)), 0.0, 0.0],
             [0.0, 0.0, -1.0, 0.0],
-            [-1.0, -1.0, 0.0, 1.0],
+            [
+                (right + left) / (left - right),
+                (top + bottom) / (bottom - top),
+                0.0,
+                1.0,
+            ],
         ];
+        let clip_off = draw_data.display_pos;
+        let clip_scale = draw_data.framebuffer_scale;
 
         let temp_buf = device
             .create_buffer_mapped(64, wgpu::BufferUsage::TRANSFER_SRC)
@@ -353,59 +358,86 @@ impl Renderer {
 
         rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
 
-        ui.render(|ui, mut draw_data| {
-            draw_data.scale_clip_rects(ui.imgui().display_framebuffer_scale());
+        for draw_list in draw_data.draw_lists() {
+            self.render_draw_list(device, &mut rpass, &draw_list, fb_size, clip_off, clip_scale)?;
+        }
 
-            for draw_list in &draw_data {
-                self.render_draw_list(device, &mut rpass, &draw_list, fb_size)?;
-            }
-            Ok(())
-        })
+        Ok(())
     }
 
-    fn render_draw_list<'data, 'render>(
+    fn render_draw_list<'render>(
         &mut self,
         device: &mut wgpu::Device,
         rpass: &mut wgpu::RenderPass<'render>,
-        draw_list: &DrawList<'data>,
+        draw_list: &DrawList,
         fb_size: (f32, f32),
+        clip_off: [f32; 2],
+        clip_scale: [f32; 2],
     ) -> RendererResult<()> {
         let (fb_width, fb_height) = fb_size;
 
         let base_vertex = self.vertex_count;
         let mut start = self.index_count as u32;
 
-        let vertex_buffer = self.upload_vertex_buffer(device, draw_list.vtx_buffer)?;
-        let index_buffer = self.upload_index_buffer(device, draw_list.idx_buffer)?;
+        let vertex_buffer = self.upload_vertex_buffer(device, draw_list.vtx_buffer())?;
+        let index_buffer = self.upload_index_buffer(device, draw_list.idx_buffer())?;
 
         rpass.set_vertex_buffers(&[(&vertex_buffer, 0)]);
         rpass.set_index_buffer(&index_buffer, 0);
 
-        for cmd in draw_list.cmd_buffer {
-            let texture_id = cmd.texture_id.into();
-            let tex = self
-                .textures
-                .get(texture_id)
-                .ok_or_else(|| RendererError::BadTexture(texture_id))?;
+        for cmd in draw_list.commands() {
+            match cmd {
+                DrawCmd::Elements {
+                    count,
+                    cmd_params:
+                        DrawCmdParams {
+                            clip_rect,
+                            texture_id,
+                            ..
+                        },
+                } => {
+                    let clip_rect = [
+                        (clip_rect[0] - clip_off[0]) * clip_scale[0],
+                        (clip_rect[1] - clip_off[1]) * clip_scale[1],
+                        (clip_rect[2] - clip_off[0]) * clip_scale[0],
+                        (clip_rect[3] - clip_off[1]) * clip_scale[1],
+                    ];
 
-            rpass.set_bind_group(1, tex.bind_group(), &[]);
+                    let end = start + count as u32;
 
-            let end = start + cmd.elem_count;
-            rpass.set_scissor_rect(
-              cmd.clip_rect.x.max(0.0).min(fb_width).round() as u32,
-              cmd.clip_rect.y.max(0.0).min(fb_height).round() as u32,
-              (cmd.clip_rect.z - cmd.clip_rect.x)
-                .abs()
-                .min(fb_width)
-                .round() as u32,
-              (cmd.clip_rect.w - cmd.clip_rect.y)
-                .abs()
-                .min(fb_height)
-                .round() as u32,
-            );
-            rpass.draw_indexed(start..end, base_vertex as i32, 0..1);
+                    if clip_rect[0] < fb_width
+                        && clip_rect[1] < fb_height
+                        && clip_rect[2] >= 0.0
+                        && clip_rect[3] >= 0.0
+                    {
+                        let tex = self
+                            .textures
+                            .get(texture_id)
+                            .ok_or_else(|| RendererError::BadTexture(texture_id))?;
+                        
+                        rpass.set_bind_group(1, tex.bind_group(), &[]);
+                        rpass.set_scissor_rect(
+                            clip_rect[0].max(0.0).min(fb_width).round() as u32,
+                            clip_rect[1].max(0.0).min(fb_height).round() as u32,
+                            (clip_rect[2] - clip_rect[0])
+                                .abs()
+                                .min(fb_width)
+                                .round() as u32,
+                            (clip_rect[3] - clip_rect[1])
+                                .abs()
+                                .min(fb_height)
+                                .round() as u32,
+                        );
+                        rpass.draw_indexed(start..end, base_vertex as i32, 0..1);
+                    }
 
-            start = end;
+                    start = end;
+                }
+                DrawCmd::ResetRenderState => (), // TODO
+                DrawCmd::RawCallback { callback, raw_cmd } => unsafe {
+                    callback(draw_list.raw(), raw_cmd)
+                },
+            }
         }
         Ok(())
     }
@@ -574,7 +606,7 @@ fn upload_font_texture(
         wgpu::TextureFormat::Rgba8Unorm,
         device,
     );
-    fonts.tex_id = TextureId::from(usize::MAX);
+    fonts.tex_id = TextureId::from(std::usize::MAX);
 
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         address_mode_u: wgpu::AddressMode::ClampToEdge,
