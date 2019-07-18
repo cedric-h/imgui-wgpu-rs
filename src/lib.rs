@@ -1,4 +1,4 @@
-use imgui::{DrawList, FrameSize, ImDrawIdx, ImDrawVert, ImGui, ImTexture, Textures, Ui};
+use imgui::{DrawList, DrawData, DrawIdx, DrawVert, Context, TextureId, Textures, Ui, ImString};
 use std::mem::size_of;
 use std::slice::from_raw_parts;
 use std::str::from_utf8;
@@ -9,7 +9,7 @@ pub type RendererResult<T> = Result<T, RendererError>;
 pub enum RendererError {
     VertexBufferTooSmall,
     IndexBufferTooSmall,
-    BadTexture(ImTexture),
+    BadTexture(TextureId),
 }
 
 #[allow(dead_code)]
@@ -52,13 +52,13 @@ impl Shaders {
     }
 }
 
-pub struct Texture {
+pub struct WgpuTexture {
     texture: wgpu::Texture,
     sampler: wgpu::Sampler,
     bind_group: wgpu::BindGroup,
 }
 
-impl Texture {
+impl WgpuTexture {
     pub fn new(
         texture: wgpu::Texture,
         sampler: wgpu::Sampler,
@@ -81,7 +81,7 @@ impl Texture {
             ],
         });
 
-        Texture {
+        WgpuTexture {
             texture,
             sampler,
             bind_group,
@@ -108,15 +108,15 @@ pub struct Renderer {
     index_buffer: wgpu::Buffer,
     index_count: u64,
     index_max: u64,
-    textures: Textures<Texture>,
-    atlas: ImTexture,
+    textures: Textures<WgpuTexture>,
+    font_texture: WgpuTexture,
     clear_color: Option<wgpu::Color>,
     texture_layout: wgpu::BindGroupLayout,
 }
 
 impl Renderer {
     pub fn new(
-        imgui: &mut ImGui,
+        context: &mut Context,
         device: &mut wgpu::Device,
         format: wgpu::TextureFormat,
         clear_color: Option<wgpu::Color>,
@@ -211,7 +211,7 @@ impl Renderer {
             depth_stencil_state: None,
             index_format: wgpu::IndexFormat::Uint16,
             vertex_buffers: &[wgpu::VertexBufferDescriptor {
-                stride: size_of::<ImDrawVert>() as u64,
+                stride: size_of::<DrawVert>() as u64,
                 step_mode: wgpu::InputStepMode::Vertex,
                 attributes: &[
                     wgpu::VertexAttributeDescriptor {
@@ -236,7 +236,7 @@ impl Renderer {
 
         // Create vertex/index buffer
         let vertex_max: u64 = 32768;
-        let vertex_size = size_of::<ImDrawVert>() as u64;
+        let vertex_size = size_of::<DrawVert>() as u64;
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             size: vertex_max * vertex_size,
             usage: wgpu::BufferUsage::VERTEX | wgpu::BufferUsage::TRANSFER_DST,
@@ -249,50 +249,17 @@ impl Renderer {
             usage: wgpu::BufferUsage::INDEX | wgpu::BufferUsage::TRANSFER_DST,
         });
 
-        // Create texture
-        let texture = imgui.prepare_texture(|handle| {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                size: wgpu::Extent3d {
-                    width: handle.width,
-                    height: handle.height,
-                    depth: 1,
-                },
-                array_layer_count: 1,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::TRANSFER_DST,
-            });
+        // Create font texture
+        let font_texture = upload_font_texture(context.fonts(), &texture_layout, device);
 
-            Renderer::upload_immediate(
-                handle.width,
-                handle.height,
-                handle.pixels,
-                &texture,
-                device,
-            );
-            Result::Ok(texture)
-        })?;
+        // Create textures storage
+        let textures = Textures::new();
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
-            lod_min_clamp: -100.0,
-            lod_max_clamp: 100.0,
-            compare_function: wgpu::CompareFunction::Always,
-            //max_anisotropy: 0,
-            //border_color: wgpu::BorderColor::TransparentBlack,
-        });
-
-        let pair = Texture::new(texture, sampler, &texture_layout, device);
-        let mut textures = Textures::new();
-        let atlas = textures.insert(pair);
-        imgui.set_font_texture_id(atlas);
+        // Set the renderer name
+        context.set_renderer_name(Some(ImString::from(format!(
+            "imgui-wgpu {}",
+            env!("CARGO_PKG_VERSION")
+        ))));
 
         Ok(Renderer {
             pipeline,
@@ -305,27 +272,31 @@ impl Renderer {
             index_count: 0,
             index_max,
             textures,
-            atlas,
+            font_texture,
             clear_color,
             texture_layout,
         })
+    }
+
+    pub fn reload_font_texture(
+        &mut self,
+        context: &mut imgui::Context,
+        device: &mut wgpu::Device,
+    ) {
+        self.font_texture = upload_font_texture(context.fonts(), &self.texture_layout, device);
     }
 
     pub fn texture_layout(&self) -> &wgpu::BindGroupLayout {
         &self.texture_layout
     }
 
-    pub fn textures(&mut self) -> &mut Textures<Texture> {
+    pub fn textures(&mut self) -> &mut Textures<WgpuTexture> {
         &mut self.textures
     }
 
-    pub fn atlas(&mut self) -> &Texture {
-        &mut self.textures.get(self.atlas).unwrap()
-    }
-
-    pub fn render<'a>(
+    pub fn render(
         &mut self,
-        ui: Ui<'a>,
+        draw_data: &DrawData,
         device: &mut wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
@@ -451,13 +422,13 @@ impl Renderer {
     fn upload_vertex_buffer(
         &mut self,
         device: &mut wgpu::Device,
-        vtx_buffer: &[ImDrawVert],
+        vtx_buffer: &[DrawVert],
     ) -> RendererResult<wgpu::Buffer> {
         //  ) -> RendererResult<()> {
         //let vertex_count = vtx_buffer.len() as u64;
         /*
         if self.vertex_count + vertex_count < self.vertex_max {
-          self.vertex_buffer.set_sub_data(self.vertex_count * (size_of::<ImDrawVert>() as u64), cast_slice(vtx_buffer));
+          self.vertex_buffer.set_sub_data(self.vertex_count * (size_of::<DrawVert>() as u64), cast_slice(vtx_buffer));
           self.vertex_count += vertex_count;
           Ok(())
         }
@@ -465,7 +436,7 @@ impl Renderer {
           Err(RendererError::VertexBufferTooSmall)
         }
         */
-        let size = vtx_buffer.len(); // * size_of::<ImDrawVert>();
+        let size = vtx_buffer.len(); // * size_of::<DrawVert>();
         let temp_buf = device
             .create_buffer_mapped(
                 size,
@@ -481,13 +452,13 @@ impl Renderer {
     fn upload_index_buffer(
         &mut self,
         device: &mut wgpu::Device,
-        idx_buffer: &[ImDrawIdx],
+        idx_buffer: &[DrawIdx],
     ) -> RendererResult<wgpu::Buffer> {
         //  ) -> RendererResult<()> {
         //let index_count = idx_buffer.len() as u64;
         /*
         if self.index_count + index_count < self.index_max {
-          self.index_buffer.set_sub_data(self.index_count * (size_of::<ImDrawIdx>() as u64), cast_slice(idx_buffer));
+          self.index_buffer.set_sub_data(self.index_count * (size_of::<DrawIdx>() as u64), cast_slice(idx_buffer));
           self.index_count += index_count;
           Ok(())
         }
@@ -495,7 +466,7 @@ impl Renderer {
           Err(RendererError::IndexBufferTooSmall)
         }
         */
-        let size = idx_buffer.len(); // * size_of::<ImDrawIdx>();
+        let size = idx_buffer.len(); // * size_of::<DrawIdx>();
         let temp_buf = device
             .create_buffer_mapped(
                 size,
@@ -507,53 +478,116 @@ impl Renderer {
         //buffer.unmap();
         Ok(temp_buf)
     }
-
-    fn upload_immediate(
-        width: u32,
-        height: u32,
-        data: &[u8],
-        target: &wgpu::Texture,
-        device: &mut wgpu::Device,
-    ) {
-        // Place in wgpu buffer
-        let bytes = data.len();
-        let buffer = device
-            .create_buffer_mapped(bytes, wgpu::BufferUsage::TRANSFER_SRC)
-            .fill_from_slice(data);
-
-        // Upload immediately
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
-
-        let pixel_size = (bytes as u32) / width / height;
-        encoder.copy_buffer_to_texture(
-            wgpu::BufferCopyView {
-                buffer: &buffer,
-                offset: 0,
-                row_pitch: pixel_size * width,
-                image_height: height,
-            },
-            wgpu::TextureCopyView {
-                texture: target,
-                mip_level: 0,
-                array_layer: 0,
-                origin: wgpu::Origin3d {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth: 1,
-            },
-        );
-
-        device.get_queue().submit(&[encoder.finish()]);
-    }
 }
 
 pub fn cast_slice<T>(data: &[T]) -> &[u8] {
     unsafe { from_raw_parts(data.as_ptr() as *const u8, data.len() * size_of::<T>()) }
+}
+
+fn create_texture(
+    width: u32,
+    height: u32,
+    data: &[u8],
+    format: wgpu::TextureFormat,
+    device: &mut wgpu::Device,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        size: wgpu::Extent3d {
+            width: width,
+            height: height,
+            depth: 1,
+        },
+        array_layer_count: 1,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::TRANSFER_DST,
+    });
+
+    upload_immediate(
+        width,
+        height,
+        data,
+        &texture,
+        device,
+    );
+
+    texture
+}
+
+fn upload_immediate(
+    width: u32,
+    height: u32,
+    data: &[u8],
+    target: &wgpu::Texture,
+    device: &mut wgpu::Device,
+) {
+    // Place in wgpu buffer
+    let bytes = data.len();
+    let buffer = device
+        .create_buffer_mapped(bytes, wgpu::BufferUsage::TRANSFER_SRC)
+        .fill_from_slice(data);
+
+    // Upload immediately
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { todo: 0 });
+
+    let pixel_size = (bytes as u32) / width / height;
+    encoder.copy_buffer_to_texture(
+        wgpu::BufferCopyView {
+            buffer: &buffer,
+            offset: 0,
+            row_pitch: pixel_size * width,
+            image_height: height,
+        },
+        wgpu::TextureCopyView {
+            texture: target,
+            mip_level: 0,
+            array_layer: 0,
+            origin: wgpu::Origin3d {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth: 1,
+        },
+    );
+
+    device.get_queue().submit(&[encoder.finish()]);
+}
+
+fn upload_font_texture(
+    mut fonts: imgui::FontAtlasRefMut,
+    texture_layout: &wgpu::BindGroupLayout,
+    device: &mut wgpu::Device
+) -> WgpuTexture {
+    let texture_data = fonts.build_rgba32_texture();
+    let texture = create_texture(
+        texture_data.width,
+        texture_data.height,
+        texture_data.data,
+        wgpu::TextureFormat::Rgba8Unorm,
+        device,
+    );
+    fonts.tex_id = TextureId::from(usize::MAX);
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        lod_min_clamp: -100.0,
+        lod_max_clamp: 100.0,
+        compare_function: wgpu::CompareFunction::Always,
+        //max_anisotropy: 0,
+        //border_color: wgpu::BorderColor::TransparentBlack,
+    });
+    WgpuTexture::new(texture, sampler, &texture_layout, device)
 }
